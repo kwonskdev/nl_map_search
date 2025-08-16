@@ -45,7 +45,16 @@ class MCPWebClient:
             args = server_config.get('args', [])
             env = server_config.get('env', {})
             
-            full_env = {**os.environ, **env}
+            # Expand environment variables in the format ${VAR_NAME}
+            expanded_env = {}
+            for key, value in env.items():
+                if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
+                    env_var_name = value[2:-1]  # Remove ${ and }
+                    expanded_env[key] = os.environ.get(env_var_name, value)
+                else:
+                    expanded_env[key] = value
+            
+            full_env = {**os.environ, **expanded_env}
 
             server_params = StdioServerParameters(
                 command=command,
