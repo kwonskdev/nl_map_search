@@ -423,7 +423,12 @@ class MCPWebClient:
         # If we hit max rounds, return a message
         logger.warning(f"Reached maximum rounds ({max_rounds}), stopping conversation")
         return "대화가 너무 길어져 중단되었습니다. 다시 시도해 주세요."
-
+    
+    def clear_conversation_history(self):
+        """Clear the conversation history to start a new conversation"""
+        logger.info("Clearing conversation history")
+        self.conversation_history.clear()
+    
     def _truncate_conversation_history(self, max_messages: int = 20):
         """Truncate conversation history to prevent it from getting too long"""
         if len(self.conversation_history) > max_messages:
@@ -646,6 +651,17 @@ def main_page():
         with ui.card().classes('w-full') as chat_section:
             chat_section.visible = False
             ui.label('채팅').classes('text-h6 mb-2')
+            
+            # Conversation management buttons
+            with ui.row().classes('mb-4 gap-2'):
+                clear_btn = ui.button('🗑️ 대화 초기화', color='warning')
+                
+                async def clear_conversation():
+                    client.clear_conversation_history()
+                    chat_history.content = '<div class="text-gray-500">대화가 초기화되었습니다. 새로운 대화를 시작하세요.</div>'
+                    ui.notify('대화가 초기화되었습니다.', type='info')
+                
+                clear_btn.on_click(clear_conversation)
             
             # Add prompt usage examples
             with ui.expansion('📝 프롬프트 사용 예시', icon='help').classes('mb-4'):
