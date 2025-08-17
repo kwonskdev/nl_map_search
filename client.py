@@ -20,6 +20,7 @@ class MCPWebClient:
         self.anthropic = Anthropic()
         self.connected_servers = []
         self.server_tools: Dict[str, List[dict]] = {}
+        self.server_prompts: Dict[str, List[dict]] = {}  # 프롬프트 목록 저장
         self.enabled_servers: Dict[str, bool] = {}
         self.enabled_tools: Dict[str, bool] = {}
         
@@ -89,6 +90,16 @@ class MCPWebClient:
                 self.server_tools[server_name].append(tool_info)
                 tool_key = f"{server_name}::{tool.name}"
                 self.enabled_tools[tool_key] = True  # Enable all tools by default
+
+            # Store prompts for this server
+            self.server_prompts[server_name] = []
+            for prompt in prompts:
+                prompt_info = {
+                    "name": prompt.name,
+                    "description": prompt.description,
+                    "arguments": prompt.arguments
+                }
+                self.server_prompts[server_name].append(prompt_info)
             
             self.enabled_servers[server_name] = True  # Enable server by default
             self.connected_servers.append(f"✓ {server_name} ({len(tools)} tools)")
@@ -97,6 +108,40 @@ class MCPWebClient:
         except Exception as e:
             self.connected_servers.append(f"✗ {server_name}: {str(e)}")
             return False
+
+    async def get_prompt(self, prompt_name: str, args: Dict[str, Any] = None) -> str:
+        """Get a prompt from any available server"""
+        for server_name, prompts in self.server_prompts.items():
+            if not self.enabled_servers.get(server_name, False):
+                continue
+                
+            for prompt in prompts:
+                if prompt['name'] == prompt_name:
+                    try:
+                        result = await self.sessions[server_name].get_prompt(prompt_name, args or {})
+                        return result.content
+                    except Exception as e:
+                        continue
+        
+        return f"프롬프트 '{prompt_name}'을 찾을 수 없습니다."
+
+    async def list_available_prompts(self) -> List[Dict[str, Any]]:
+        """List all available prompts from enabled servers"""
+        available_prompts = []
+        
+        for server_name, prompts in self.server_prompts.items():
+            if not self.enabled_servers.get(server_name, False):
+                continue
+                
+            for prompt in prompts:
+                available_prompts.append({
+                    "server": server_name,
+                    "name": prompt['name'],
+                    "description": prompt['description'],
+                    "arguments": prompt['arguments']
+                })
+        
+        return available_prompts
 
     async def auto_connect_all_servers(self):
         """Automatically connect to all servers from mcp.json"""
@@ -128,6 +173,12 @@ class MCPWebClient:
 
     async def process_query(self, query: str) -> str:
         """Process a query using Claude and available tools from enabled servers only"""
+
+        # Check if this is a prompt request
+        prompt_result = await self._handle_prompt_request(query)
+        if prompt_result:
+            return prompt_result
+        
         messages = [
             {
                 "role": "user",
@@ -264,6 +315,48 @@ class MCPWebClient:
         
         # If we hit max rounds, return a message
         return "대화가 너무 길어져 중단되었습니다. 다시 시도해 주세요."
+
+    async def _handle_prompt_request(self, query: str) -> Optional[str]:
+        """Handle prompt requests in the query"""
+        import re
+        
+        # Check for prompt call patterns
+        # Pattern 1: "create_interactive_map(검색어, 제목, 중심점, 반경)"
+        prompt_pattern = r'create_interactive_map\s*\(\s*["\']([^"\']+)["\']\s*(?:,\s*["\']([^"\']+)["\']\s*(?:,\s*["\']([^"\']+)["\']\s*(?:,\s*(\d+(?:\.\d+)?)\s*)?)?)?\s*\)'
+        
+        match = re.search(prompt_pattern, query, re.IGNORECASE)
+        if match:
+            search_query = match.group(1)
+            map_title = match.group(2) or "Interactive Map"
+            center_location = match.group(3) or ""
+            radius_km = float(match.group(4)) if match.group(4) else None
+                        
+            try:
+                prompt_result = await self.get_prompt("create_interactive_map", {
+                    "search_query": search_query,
+                    "map_title": map_title,
+                    "center_location": center_location,
+                    "radius_km": radius_km
+                })
+                
+                return f"## 🗺️ 인터랙티브 지도 생성 가이드\n\n{prompt_result}\n\n**이제 위의 가이드를 따라 실제 지도를 생성해보세요!**"
+                
+            except Exception as e:
+                return f"프롬프트 처리 중 오류가 발생했습니다: {str(e)}"
+        
+        # Pattern 2: "프롬프트: create_interactive_map" 형태
+        if "프롬프트:" in query or "prompt:" in query.lower():
+            prompt_name_match = re.search(r'(?:프롬프트|prompt):\s*(\w+)', query, re.IGNORECASE)
+            if prompt_name_match:
+                prompt_name = prompt_name_match.group(1)
+                
+                try:
+                    prompt_result = await self.get_prompt(prompt_name)
+                    return f"## 📝 프롬프트: {prompt_name}\n\n{prompt_result}"
+                except Exception as e:
+                    return f"프롬프트 '{prompt_name}'을 가져오는 중 오류가 발생했습니다: {str(e)}"
+        
+        return None
     
     async def cleanup(self):
         """Clean up resources"""
@@ -288,7 +381,9 @@ async def update_server_controls():
         with server_controls_container:
             # Server switch
             enabled = client.enabled_servers[server_name]
-            switch = ui.switch(f'{server_name} ({len(client.server_tools.get(server_name, []))} tools)', 
+            tools_count = len(client.server_tools.get(server_name, []))
+            prompts_count = len(client.server_prompts.get(server_name, []))
+            switch = ui.switch(f'{server_name} ({tools_count} tools, {prompts_count} prompts)', 
                              value=enabled)
             
             def make_server_toggle(name):
@@ -299,11 +394,13 @@ async def update_server_controls():
             
             switch.on_value_change(make_server_toggle(server_name))
             
-            # Tool buttons (only show when server is enabled)
+            # Tool and prompt buttons (only show when server is enabled)
             if enabled:
                 with ui.column().classes('ml-8 mt-2 mb-4'):
+                    # Tools section
                     tools = client.server_tools.get(server_name, [])
                     if tools:
+                        ui.label('🔧 도구 (Tools)').classes('text-sm font-bold mt-2 mb-1')
                         # Group tools in rows of 4
                         for i in range(0, len(tools), 4):
                             with ui.row().classes('gap-2'):
@@ -314,7 +411,8 @@ async def update_server_controls():
                                     def make_tool_button(key, tool_name, description):
                                         def toggle_tool():
                                             current_state = client.enabled_tools.get(key, True)
-                                            client.enabled_tools[key] = not current_state
+                                            new_state = not current_state
+                                            client.enabled_tools[key] = new_state
                                             # Update UI immediately
                                             asyncio.create_task(update_server_controls())
                                         return toggle_tool
@@ -326,6 +424,34 @@ async def update_server_controls():
                                         color=color,
                                         on_click=make_tool_button(tool_key, tool['name'], tool['description'])
                                     ).props('size=sm').tooltip(tool['description'])
+                    
+                    # Prompts section
+                    prompts = client.server_prompts.get(server_name, [])
+                    if prompts:
+                        ui.label('📝 프롬프트 (Prompts)').classes('text-sm font-bold mt-4 mb-1')
+                        # Group prompts in rows of 3
+                        for i in range(0, len(prompts), 3):
+                            with ui.row().classes('gap-2'):
+                                for prompt in prompts[i:i+3]:
+                                    def make_prompt_button(prompt_name, prompt_description):
+                                        async def show_prompt():
+                                            try:
+                                                prompt_result = await client.get_prompt(prompt_name)
+                                                # Show prompt in a dialog
+                                                with ui.dialog() as dialog, ui.card():
+                                                    ui.label(f'📝 프롬프트: {prompt_name}').classes('text-h6 mb-2')
+                                                    ui.html(f'<pre style="white-space: pre-wrap; word-wrap: break-word;">{prompt_result}</pre>').classes('max-w-2xl max-h-96 overflow-y-auto')
+                                                    ui.button('닫기', on_click=dialog.close).props('color=primary')
+                                                dialog.open()
+                                            except Exception as e:
+                                                ui.notify(f'프롬프트 표시 오류: {str(e)}', type='error')
+                                        return show_prompt
+                                    
+                                    btn = ui.button(
+                                        prompt['name'], 
+                                        color='secondary',
+                                        on_click=make_prompt_button(prompt['name'], prompt['description'])
+                                    ).props('size=sm').tooltip(prompt['description'])
 
 async def update_tool_controls():
     """Deprecated - tool controls are now integrated with server controls"""
@@ -362,7 +488,7 @@ def main_page():
     ui.page_title('MCP Web Client')
     
     with ui.header():
-        ui.label('MCP Web Client').classes('text-h4')
+        ui.label('MCP Web Client').classes('text-h6')
     
     with ui.column().classes('w-full max-w-6xl mx-auto p-4'):
         # Connection status section
@@ -375,7 +501,7 @@ def main_page():
         with ui.card().classes('w-full mb-4') as server_control_section:
             server_control_section.visible = False
             ui.label('서버 및 도구 제어').classes('text-h6 mb-2')
-            ui.label('서버를 끄면 해당 서버의 모든 도구가 비활성화됩니다. 개별 도구는 버튼을 클릭해서 켜고 끌 수 있습니다.').classes('text-sm text-gray-600 mb-4')
+            ui.label('서버를 끄면 해당 서버의 모든 도구와 프롬프트가 비활성화됩니다. 개별 도구와 프롬프트는 버튼을 클릭해서 켜고 끌 수 있습니다.').classes('text-sm text-gray-600 mb-4')
             server_controls_container = ui.column()
             
         # Auto-initialize when page loads
@@ -385,6 +511,25 @@ def main_page():
         with ui.card().classes('w-full') as chat_section:
             chat_section.visible = False
             ui.label('채팅').classes('text-h6 mb-2')
+            
+            # Add prompt usage examples
+            with ui.expansion('📝 프롬프트 사용 예시', icon='help').classes('mb-4'):
+                ui.markdown("""
+                ### 프롬프트 사용 방법:
+                
+                **1. create_interactive_map 프롬프트:**
+                ```
+                create_interactive_map("홍대 카페", "홍대 카페 지도", "홍대입구역", 2.0)
+                ```
+                
+                **2. 일반 프롬프트 호출:**
+                ```
+                프롬프트: create_interactive_map
+                ```
+                
+                **3. 프롬프트 버튼 클릭:**
+                - 위의 서버 제어 섹션에서 프롬프트 버튼을 클릭하면 프롬프트 내용을 확인할 수 있습니다.
+                """)
             
             chat_history = ui.html().classes('w-full border p-4 mb-4 bg-gray-50 min-h-64 max-h-96 overflow-y-auto')
             
