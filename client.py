@@ -45,6 +45,8 @@ class MCPWebClient:
         self.enabled_servers: Dict[str, bool] = {}
         self.enabled_tools: Dict[str, bool] = {}
         self.conversation_history: List[Dict[str, Any]] = []  # 대화 히스토리 저장
+        self.chat_sessions: Dict[str, List[Dict[str, Any]]] = {}  # 멀티 탭 채팅 세션
+        self.current_chat_id: str = "default"  # 현재 활성 채팅 세션 ID
         logger.info("MCPWebClient initialized successfully")
         
     def load_mcp_config(self, config_path: str) -> Dict[str, Any]:
@@ -272,6 +274,9 @@ class MCPWebClient:
             "content": query
         })
         
+        # Save current session
+        self._save_current_session()
+        
         # Truncate conversation history if it gets too long
         self._truncate_conversation_history()
         
@@ -416,6 +421,9 @@ class MCPWebClient:
                 "content": tool_results
             })
             
+            # Save current session after each round
+            self._save_current_session()
+            
             # Update request parameters for next round
             request_params["messages"] = self.conversation_history.copy()
             round_count += 1
@@ -428,6 +436,49 @@ class MCPWebClient:
         """Clear the conversation history to start a new conversation"""
         logger.info("Clearing conversation history")
         self.conversation_history.clear()
+    
+    def create_new_chat_session(self) -> str:
+        """Create a new chat session and return its ID"""
+        import uuid
+        chat_id = str(uuid.uuid4())[:8]  # Short ID for display
+        self.chat_sessions[chat_id] = []
+        
+        # Ensure default session exists if this is the first session
+        if "default" not in self.chat_sessions:
+            self.chat_sessions["default"] = []
+            self.current_chat_id = "default"
+        
+        logger.info(f"Created new chat session: {chat_id}")
+        return chat_id
+    
+    def switch_chat_session(self, chat_id: str):
+        """Switch to a different chat session"""
+        if chat_id in self.chat_sessions:
+            self.current_chat_id = chat_id
+            self.conversation_history = self.chat_sessions[chat_id].copy()
+            logger.info(f"Switched to chat session: {chat_id}")
+        else:
+            logger.warning(f"Chat session {chat_id} not found")
+    
+    def delete_chat_session(self, chat_id: str):
+        """Delete a chat session"""
+        if chat_id in self.chat_sessions:
+            del self.chat_sessions[chat_id]
+            logger.info(f"Deleted chat session: {chat_id}")
+            
+            # If we deleted the current session, switch to default
+            if chat_id == self.current_chat_id:
+                if "default" in self.chat_sessions:
+                    self.switch_chat_session("default")
+                else:
+                    # Create new default session
+                    self.current_chat_id = "default"
+                    self.chat_sessions["default"] = []
+                    self.conversation_history = []
+    
+    def _save_current_session(self):
+        """Save current conversation to the current chat session"""
+        self.chat_sessions[self.current_chat_id] = self.conversation_history.copy()
     
     def _truncate_conversation_history(self, max_messages: int = 20):
         """Truncate conversation history to prevent it from getting too long"""
@@ -497,6 +548,8 @@ server_control_section = None
 chat_section = None
 status_area = None
 server_controls_container = None
+chat_tabs_container = None
+chat_content_container = None
 
 async def update_server_controls():
     """Update server control switches and tool buttons"""
@@ -591,6 +644,161 @@ async def update_tool_controls():
     logger.debug("update_tool_controls called (deprecated)")
     pass
 
+async def update_chat_tabs():
+    """Update chat tabs UI"""
+    logger.debug("Updating chat tabs UI")
+    if not chat_tabs_container:
+        logger.warning("Chat tabs container not available")
+        return
+    
+    chat_tabs_container.clear()
+    
+    # Ensure default session exists
+    if "default" not in client.chat_sessions:
+        client.chat_sessions["default"] = []
+        client.current_chat_id = "default"
+    
+    # If no current chat ID is set, use default
+    if not client.current_chat_id:
+        client.current_chat_id = "default"
+    
+    for chat_id in client.chat_sessions.keys():
+        with chat_tabs_container:
+            # Determine if this is the active tab
+            is_active = chat_id == client.current_chat_id
+            active_class = "bg-blue-100 border-b-0" if is_active else "bg-gray-50 hover:bg-gray-100"
+            
+            # Create tab button with hover effect for close button
+            tab_content = f'<div class="flex items-center gap-2 px-3 py-1 rounded-t-lg cursor-pointer {active_class}" style="min-width: 120px;">'
+            tab_content += f'<span class="flex-grow">채팅 {chat_id}</span>'
+            tab_content += f'<button class="close-tab opacity-0 hover:opacity-100 transition-opacity text-red-500 hover:text-red-700" data-chat-id="{chat_id}">✕</button>'
+            tab_content += '</div>'
+            
+            tab_div = ui.html(tab_content).classes('border border-gray-300')
+            
+            # Add click handler for tab switching
+            def make_tab_click_handler(chat_id):
+                async def switch_tab():
+                    client.switch_chat_session(chat_id)
+                    await update_chat_content()
+                    await update_chat_tabs()  # Refresh tabs to show active state
+                return switch_tab
+            
+            # Add click handler for close button
+            def make_close_handler(chat_id):
+                async def close_tab():
+                    if len(client.chat_sessions) > 1:  # Don't close if it's the last tab
+                        client.delete_chat_session(chat_id)
+                        await update_chat_tabs()
+                        await update_chat_content()
+                        ui.notify(f'채팅 탭이 닫혔습니다.', type='info')
+                    else:
+                        ui.notify(f'마지막 탭은 닫을 수 없습니다.', type='warning')
+                return close_tab
+            
+            # Add event listeners for tab switching and closing
+            def handle_tab_click(event):
+                # Check if close button was clicked
+                if event.target.classList.contains('close-tab'):
+                    chat_id = event.target.getAttribute('data-chat-id')
+                    asyncio.create_task(make_close_handler(chat_id)())
+                else:
+                    # Regular tab click - switch to this tab
+                    asyncio.create_task(make_tab_click_handler(chat_id)())
+            
+            tab_div.on('click', handle_tab_click)
+    
+    logger.debug("Chat tabs UI updated")
+
+async def update_chat_content():
+    """Update chat content area"""
+    logger.debug("Updating chat content area")
+    if not chat_content_container:
+        logger.warning("Chat content container not available")
+        return
+    
+    chat_content_container.clear()
+    
+    with chat_content_container:
+        # Conversation management buttons
+        with ui.row().classes('mb-4 gap-2'):
+            clear_btn = ui.button('🗑️ 대화 초기화', color='warning')
+            
+            async def clear_conversation():
+                client.clear_conversation_history()
+                await update_chat_content()
+                ui.notify('대화가 초기화되었습니다.', type='info')
+            
+            clear_btn.on_click(clear_conversation)
+        
+        # Chat history display
+        chat_history = ui.html().classes('w-full border p-4 mb-4 bg-gray-50 min-h-64 max-h-96 overflow-y-auto')
+        
+        # Display existing messages
+        if client.conversation_history:
+            history_html = ""
+            for msg in client.conversation_history:
+                if msg["role"] == "user":
+                    if isinstance(msg["content"], str):
+                        history_html += f'<div class="mb-2"><strong>사용자:</strong> {msg["content"]}</div>'
+                elif msg["role"] == "assistant":
+                    if isinstance(msg["content"], list):
+                        for content in msg["content"]:
+                            if content.get("type") == "text":
+                                history_html += f'<div class="mb-2"><strong>AI:</strong> <pre style="white-space: pre-wrap; word-wrap: break-word;">{content["text"]}</pre></div>'
+            chat_history.content = history_html
+        else:
+            chat_history.content = '<div class="text-gray-500">새로운 대화를 시작하세요.</div>'
+        
+        # Input area
+        with ui.row().classes('w-full'):
+            query_input = ui.input('질문을 입력하세요...').classes('flex-grow')
+            send_btn = ui.button('전송', color='primary')
+        
+        async def send_query():
+            if not query_input.value.strip():
+                logger.debug("Empty query, ignoring")
+                return
+            
+            query = query_input.value
+            query_input.value = ''
+            logger.info(f"User sent query: {query[:100]}{'...' if len(query) > 100 else ''}")
+            
+            # Add user message to chat
+            chat_history.content += f'<div class="mb-2"><strong>사용자:</strong> {query}</div>'
+            
+            try:
+                # Add loading indicator
+                chat_history.content += '<div class="mb-2"><strong>AI:</strong> <em>응답 생성 중...</em></div>'
+                
+                response = await client.process_query(query)
+                logger.info("Query processed successfully")
+                
+                # Replace loading indicator with actual response
+                chat_content = chat_history.content
+                last_loading_idx = chat_content.rfind('<div class="mb-2"><strong>AI:</strong> <em>응답 생성 중...</em></div>')
+                if last_loading_idx != -1:
+                    chat_history.content = (
+                        chat_content[:last_loading_idx] + 
+                        f'<div class="mb-2"><strong>AI:</strong> <pre style="white-space: pre-wrap; word-wrap: break-word;">{response}</pre></div>'
+                    )
+                
+            except Exception as e:
+                logger.error(f"Error processing query: {str(e)}", exc_info=True)
+                # Replace loading indicator with error message
+                chat_content = chat_history.content
+                last_loading_idx = chat_content.rfind('<div class="mb-2"><strong>AI:</strong> <em>응답 생성 중...</em></div>')
+                if last_loading_idx != -1:
+                    chat_history.content = (
+                        chat_content[:last_loading_idx] + 
+                        f'<div class="mb-2"><strong>오류:</strong> {str(e)}</div>'
+                    )
+        
+        send_btn.on_click(send_query)
+        query_input.on('keydown.enter', send_query)
+    
+    logger.debug("Chat content area updated")
+
 async def initialize_app():
     """Initialize the application by connecting to all servers"""
     global status_area, server_control_section, chat_section
@@ -612,6 +820,8 @@ async def initialize_app():
             if chat_section:
                 chat_section.visible = True
             await update_server_controls()
+            await update_chat_tabs()
+            await update_chat_content()
         else:
             logger.warning(f"Application initialization failed: {message}")
     except Exception as e:
@@ -622,7 +832,7 @@ async def initialize_app():
 @ui.page('/')
 def main_page():
     global status_area, server_control_section, chat_section
-    global server_controls_container
+    global server_controls_container, chat_tabs_container, chat_content_container
     
     logger.info("Setting up main page")
     ui.page_title('MCP Web Client')
@@ -644,24 +854,27 @@ def main_page():
             ui.label('서버를 끄면 해당 서버의 모든 도구와 프롬프트가 비활성화됩니다. 개별 도구와 프롬프트는 버튼을 클릭해서 켜고 끌 수 있습니다.').classes('text-sm text-gray-600 mb-4')
             server_controls_container = ui.column()
             
-        # Auto-initialize when page loads
-        ui.timer(0.1, initialize_app, once=True)
-        
         # Chat section (initially hidden)
         with ui.card().classes('w-full') as chat_section:
             chat_section.visible = False
             ui.label('채팅').classes('text-h6 mb-2')
             
-            # Conversation management buttons
-            with ui.row().classes('mb-4 gap-2'):
-                clear_btn = ui.button('🗑️ 대화 초기화', color='warning')
+            # Chat tabs and new chat button
+            with ui.row().classes('mb-4 gap-2 items-center'):
+                chat_tabs_container = ui.row().classes('flex-grow gap-1')
+                new_chat_btn = ui.button('➕', color='primary').props('size=sm round')
                 
-                async def clear_conversation():
-                    client.clear_conversation_history()
-                    chat_history.content = '<div class="text-gray-500">대화가 초기화되었습니다. 새로운 대화를 시작하세요.</div>'
-                    ui.notify('대화가 초기화되었습니다.', type='info')
+                async def create_new_chat():
+                    chat_id = client.create_new_chat_session()
+                    client.switch_chat_session(chat_id)
+                    await update_chat_tabs()
+                    await update_chat_content()
+                    ui.notify(f'새 채팅이 생성되었습니다.', type='info')
                 
-                clear_btn.on_click(clear_conversation)
+                new_chat_btn.on_click(create_new_chat)
+            
+            # Chat content area
+            chat_content_container = ui.column().classes('w-full')
             
             # Add prompt usage examples
             with ui.expansion('📝 프롬프트 사용 예시', icon='help').classes('mb-4'):
@@ -681,59 +894,14 @@ def main_page():
                 **3. 프롬프트 버튼 클릭:**
                 - 위의 서버 제어 섹션에서 프롬프트 버튼을 클릭하면 프롬프트 내용을 확인할 수 있습니다.
                 
-                ### 멀티턴 대화:
-                - 이제 이전 대화 내용을 기억하여 연속적인 대화가 가능합니다.
-                - "대화 초기화" 버튼으로 새로운 대화를 시작할 수 있습니다.
-                - "대화 요약" 버튼으로 현재 대화 상태를 확인할 수 있습니다.
+                ### 멀티 탭 채팅:
+                - ➕ 버튼을 클릭하여 새로운 채팅 탭을 생성할 수 있습니다.
+                - 각 탭은 독립적인 대화 히스토리를 가집니다.
+                - 탭에 마우스를 올리면 X 버튼이 나타나 탭을 닫을 수 있습니다.
                 """)
-            
-            chat_history = ui.html().classes('w-full border p-4 mb-4 bg-gray-50 min-h-64 max-h-96 overflow-y-auto')
-            
-            with ui.row().classes('w-full'):
-                query_input = ui.input('질문을 입력하세요...').classes('flex-grow')
-                send_btn = ui.button('전송', color='primary')
-            
-            async def send_query():
-                if not query_input.value.strip():
-                    logger.debug("Empty query, ignoring")
-                    return
-                
-                query = query_input.value
-                query_input.value = ''
-                logger.info(f"User sent query: {query[:100]}{'...' if len(query) > 100 else ''}")
-                
-                # Add user message to chat
-                chat_history.content += f'<div class="mb-2"><strong>사용자:</strong> {query}</div>'
-                
-                try:
-                    # Add loading indicator
-                    chat_history.content += '<div class="mb-2"><strong>AI:</strong> <em>응답 생성 중...</em></div>'
-                    
-                    response = await client.process_query(query)
-                    logger.info("Query processed successfully")
-                    
-                    # Replace loading indicator with actual response
-                    chat_content = chat_history.content
-                    last_loading_idx = chat_content.rfind('<div class="mb-2"><strong>AI:</strong> <em>응답 생성 중...</em></div>')
-                    if last_loading_idx != -1:
-                        chat_history.content = (
-                            chat_content[:last_loading_idx] + 
-                            f'<div class="mb-2"><strong>AI:</strong> <pre style="white-space: pre-wrap; word-wrap: break-word;">{response}</pre></div>'
-                        )
-                    
-                except Exception as e:
-                    logger.error(f"Error processing query: {str(e)}", exc_info=True)
-                    # Replace loading indicator with error message
-                    chat_content = chat_history.content
-                    last_loading_idx = chat_content.rfind('<div class="mb-2"><strong>AI:</strong> <em>응답 생성 중...</em></div>')
-                    if last_loading_idx != -1:
-                        chat_history.content = (
-                            chat_content[:last_loading_idx] + 
-                            f'<div class="mb-2"><strong>오류:</strong> {str(e)}</div>'
-                        )
-            
-            send_btn.on_click(send_query)
-            query_input.on('keydown.enter', send_query)
+        
+        # Auto-initialize when page loads (after all UI components are created)
+        ui.timer(0.1, initialize_app, once=True)
     
     logger.info("Main page setup completed")
 
