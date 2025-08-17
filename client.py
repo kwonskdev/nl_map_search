@@ -551,6 +551,14 @@ server_controls_container = None
 chat_tabs_container = None
 chat_content_container = None
 
+# Global notification function that's safe to use after UI updates
+def safe_notify(message: str, type: str = 'info'):
+    """Safely show notification without depending on specific UI context"""
+    try:
+        ui.notify(message, type=type)
+    except Exception as e:
+        logger.info(f"Notification failed: {message} (error: {e})")
+
 async def update_server_controls():
     """Update server control switches and tool buttons"""
     logger.debug("Updating server controls UI")
@@ -668,45 +676,37 @@ async def update_chat_tabs():
             is_active = chat_id == client.current_chat_id
             active_class = "bg-blue-100 border-b-0" if is_active else "bg-gray-50 hover:bg-gray-100"
             
-            # Create tab button with hover effect for close button
-            tab_content = f'<div class="flex items-center gap-2 px-3 py-1 rounded-t-lg cursor-pointer {active_class}" style="min-width: 120px;">'
-            tab_content += f'<span class="flex-grow">채팅 {chat_id}</span>'
-            tab_content += f'<button class="close-tab opacity-0 hover:opacity-100 transition-opacity text-red-500 hover:text-red-700" data-chat-id="{chat_id}">✕</button>'
-            tab_content += '</div>'
-            
-            tab_div = ui.html(tab_content).classes('border border-gray-300')
-            
-            # Add click handler for tab switching
-            def make_tab_click_handler(chat_id):
-                async def switch_tab():
-                    client.switch_chat_session(chat_id)
-                    await update_chat_content()
-                    await update_chat_tabs()  # Refresh tabs to show active state
-                return switch_tab
-            
-            # Add click handler for close button
-            def make_close_handler(chat_id):
-                async def close_tab():
-                    if len(client.chat_sessions) > 1:  # Don't close if it's the last tab
-                        client.delete_chat_session(chat_id)
-                        await update_chat_tabs()
+            # Create tab with separate close button
+            with ui.row().classes(f'border border-gray-300 {active_class} rounded-t-lg cursor-pointer').style('min-width: 120px;'):
+                # Tab label (clickable for switching)
+                tab_label = ui.label(f'채팅 {chat_id}').classes('flex-grow px-3 py-1')
+                
+                # Close button (separate from tab label)
+                close_btn = ui.button('✕', color='red').props('size=sm round flat').classes('opacity-0 hover:opacity-100 transition-opacity')
+                
+                # Add click handler for tab switching
+                def make_tab_click_handler(chat_id):
+                    async def switch_tab():
+                        client.switch_chat_session(chat_id)
                         await update_chat_content()
-                        ui.notify(f'채팅 탭이 닫혔습니다.', type='info')
-                    else:
-                        ui.notify(f'마지막 탭은 닫을 수 없습니다.', type='warning')
-                return close_tab
-            
-            # Add event listeners for tab switching and closing
-            def handle_tab_click(event):
-                # Check if close button was clicked
-                if event.target.classList.contains('close-tab'):
-                    chat_id = event.target.getAttribute('data-chat-id')
-                    asyncio.create_task(make_close_handler(chat_id)())
-                else:
-                    # Regular tab click - switch to this tab
-                    asyncio.create_task(make_tab_click_handler(chat_id)())
-            
-            tab_div.on('click', handle_tab_click)
+                        await update_chat_tabs()  # Refresh tabs to show active state
+                    return switch_tab
+                
+                # Add click handler for close button
+                def make_close_handler(chat_id):
+                    async def close_tab():
+                        if len(client.chat_sessions) > 1:  # Don't close if it's the last tab
+                            client.delete_chat_session(chat_id)
+                            await update_chat_tabs()
+                            await update_chat_content()
+                            safe_notify(f'채팅 탭이 닫혔습니다.', 'info')
+                        else:
+                            safe_notify(f'마지막 탭은 닫을 수 없습니다.', 'warning')
+                    return close_tab
+                
+                # Set up event handlers
+                tab_label.on('click', make_tab_click_handler(chat_id))
+                close_btn.on('click', make_close_handler(chat_id))
     
     logger.debug("Chat tabs UI updated")
 
@@ -727,7 +727,7 @@ async def update_chat_content():
             async def clear_conversation():
                 client.clear_conversation_history()
                 await update_chat_content()
-                ui.notify('대화가 초기화되었습니다.', type='info')
+                safe_notify('대화가 초기화되었습니다.', 'info')
             
             clear_btn.on_click(clear_conversation)
         
@@ -869,7 +869,7 @@ def main_page():
                     client.switch_chat_session(chat_id)
                     await update_chat_tabs()
                     await update_chat_content()
-                    ui.notify(f'새 채팅이 생성되었습니다.', type='info')
+                    safe_notify(f'새 채팅이 생성되었습니다.', 'info')
                 
                 new_chat_btn.on_click(create_new_chat)
             
