@@ -352,7 +352,7 @@ class MCPWebClient:
 
         # Create request parameters
         request_params = {
-            "model": "claude-3-5-sonnet-20241022",
+            "model": "claude-sonnet-4-20250514", #"claude-3-5-sonnet-20241022",
             "max_tokens": 1000,
             "messages": messages,
             "system": system_message
