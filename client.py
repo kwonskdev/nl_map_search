@@ -44,6 +44,7 @@ class MCPWebClient:
         self.server_prompts: Dict[str, List[dict]] = {}  # 프롬프트 목록 저장
         self.enabled_servers: Dict[str, bool] = {}
         self.enabled_tools: Dict[str, bool] = {}
+        self.conversation_history: List[Dict[str, Any]] = []  # 대화 히스토리 저장
         logger.info("MCPWebClient initialized successfully")
         
     def load_mcp_config(self, config_path: str) -> Dict[str, Any]:
@@ -265,12 +266,17 @@ class MCPWebClient:
         if prompt_result:
             return prompt_result
         
-        messages = [
-            {
-                "role": "user",
-                "content": query
-            }
-        ]
+        # Add user message to conversation history
+        self.conversation_history.append({
+            "role": "user",
+            "content": query
+        })
+        
+        # Truncate conversation history if it gets too long
+        self._truncate_conversation_history()
+        
+        # Use conversation history for context
+        messages = self.conversation_history.copy()
 
         available_tools = []
         
@@ -399,24 +405,31 @@ class MCPWebClient:
             # Add current round's tool usage messages to the global list
             all_tool_usage_messages.extend(tool_usage_messages)
             
-            # Add assistant message and tool results to conversation
-            messages.append({
+            # Add assistant message and tool results to conversation history
+            self.conversation_history.append({
                 "role": "assistant",
                 "content": assistant_content
             })
             
-            messages.append({
+            self.conversation_history.append({
                 "role": "user",
                 "content": tool_results
             })
             
             # Update request parameters for next round
-            request_params["messages"] = messages
+            request_params["messages"] = self.conversation_history.copy()
             round_count += 1
         
         # If we hit max rounds, return a message
         logger.warning(f"Reached maximum rounds ({max_rounds}), stopping conversation")
         return "대화가 너무 길어져 중단되었습니다. 다시 시도해 주세요."
+
+    def _truncate_conversation_history(self, max_messages: int = 20):
+        """Truncate conversation history to prevent it from getting too long"""
+        if len(self.conversation_history) > max_messages:
+            logger.info(f"Truncating conversation history from {len(self.conversation_history)} to {max_messages} messages")
+            # Keep the most recent messages
+            self.conversation_history = self.conversation_history[-max_messages:]
 
     async def _handle_prompt_request(self, query: str) -> Optional[str]:
         """Handle prompt requests in the query"""
@@ -651,6 +664,11 @@ def main_page():
                 
                 **3. 프롬프트 버튼 클릭:**
                 - 위의 서버 제어 섹션에서 프롬프트 버튼을 클릭하면 프롬프트 내용을 확인할 수 있습니다.
+                
+                ### 멀티턴 대화:
+                - 이제 이전 대화 내용을 기억하여 연속적인 대화가 가능합니다.
+                - "대화 초기화" 버튼으로 새로운 대화를 시작할 수 있습니다.
+                - "대화 요약" 버튼으로 현재 대화 상태를 확인할 수 있습니다.
                 """)
             
             chat_history = ui.html().classes('w-full border p-4 mb-4 bg-gray-50 min-h-64 max-h-96 overflow-y-auto')
